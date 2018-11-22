@@ -5,6 +5,7 @@ module Paperclip
   # Paperclip.interpolates method.
   module Interpolations
     extend self
+    ID_PARTITION_LIMIT = 1_000_000_000
 
     # Hash assignment of interpolations. Included only for compatibility,
     # and is not intended for normal use.
@@ -141,7 +142,7 @@ module Paperclip
         # It's possible, though unlikely, that the mime type is not in the
         # database, so just use the part after the '/' in the mime type as the
         # extension.
-        %r{/([^/]*)\Z}.match(attachment.content_type)[1]
+        %r{/([^/]*)\z}.match(attachment.content_type)[1]
       end
     end
 
@@ -175,7 +176,11 @@ module Paperclip
     def id_partition attachment, style_name
       case id = attachment.instance.id
       when Integer
-        ("%09d".freeze % id).scan(/\d{3}/).join("/".freeze)
+        if id < ID_PARTITION_LIMIT
+          ("%09d".freeze % id).scan(/\d{3}/).join("/".freeze)
+        else
+          ("%012d".freeze % id).scan(/\d{3}/).join("/".freeze)
+        end
       when String
         id.scan(/.{3}/).first(3).join("/".freeze)
       else

@@ -1,6 +1,5 @@
-# encoding: utf-8
-require "spec_helper"
-require "active_job"
+require 'spec_helper'
+require 'active_job'
 
 describe Paperclip::Attachment do
 
@@ -53,6 +52,22 @@ describe Paperclip::Attachment do
     expect(dummy.avatar.path(:small)).to exist
     expect(dummy.avatar.path(:large)).to exist
     expect(dummy.avatar.path(:original)).to exist
+  end
+
+  it "reprocess works with virtual content_type attribute" do
+    rebuild_class styles: { small: "100x>" }
+    modify_table { |t| t.remove :avatar_content_type }
+    Dummy.send :attr_accessor, :avatar_content_type
+    Dummy.validates_attachment_content_type(
+      :avatar,
+      content_type: %w(image/jpeg image/png)
+    )
+    Dummy.create!(avatar: File.new(fixture_file("50x50.png"), "rb"))
+
+    dummy = Dummy.first
+    dummy.avatar.reprocess!(:small)
+
+    expect(dummy.avatar.path(:small)).to exist
   end
 
   context "having a not empty hash as a default option" do
@@ -501,6 +516,7 @@ describe Paperclip::Attachment do
       @attachment.expects(:post_process).with(:thumb)
       @attachment.expects(:post_process).with(:large).never
       @attachment.assign(@file)
+      @attachment.save
     end
   end
 
@@ -1401,7 +1417,7 @@ describe Paperclip::Attachment do
 
     context "and avatar_file_size column" do
       before do
-        ActiveRecord::Base.connection.add_column :dummies, :avatar_file_size, :integer
+        ActiveRecord::Base.connection.add_column :dummies, :avatar_file_size, :bigint
         rebuild_class
         @dummy = Dummy.new
       end
@@ -1434,16 +1450,46 @@ describe Paperclip::Attachment do
         assert_nothing_raised { @dummy.avatar = @file }
       end
 
-      it "returns the right value when sent #avatar_fingerprint" do
-        @dummy.avatar = @file
-        assert_equal 'aec488126c3b33c08a10c3fa303acf27', @dummy.avatar_fingerprint
+      context "with explicitly set digest" do
+        before do
+          rebuild_class adapter_options: { hash_digest: Digest::SHA256 }
+          @dummy = Dummy.new
+        end
+
+        it "returns the right value when sent #avatar_fingerprint" do
+          @dummy.avatar = @file
+          assert_equal "734016d801a497f5579cdd4ef2ae1d020088c1db754dc434482d76dd5486520a",
+                       @dummy.avatar_fingerprint
+        end
+
+        it "returns the right value when saved, reloaded, and sent #avatar_fingerprint" do
+          @dummy.avatar = @file
+          @dummy.save
+          @dummy = Dummy.find(@dummy.id)
+          assert_equal "734016d801a497f5579cdd4ef2ae1d020088c1db754dc434482d76dd5486520a",
+                       @dummy.avatar_fingerprint
+        end
       end
 
-      it "returns the right value when saved, reloaded, and sent #avatar_fingerprint" do
-        @dummy.avatar = @file
-        @dummy.save
-        @dummy = Dummy.find(@dummy.id)
-        assert_equal 'aec488126c3b33c08a10c3fa303acf27', @dummy.avatar_fingerprint
+      context "with the default digest" do
+        before do
+          rebuild_class # MD5 is the default
+          @dummy = Dummy.new
+        end
+
+        it "returns the right value when sent #avatar_fingerprint" do
+          @dummy.avatar = @file
+          assert_equal "aec488126c3b33c08a10c3fa303acf27",
+                       @dummy.avatar_fingerprint
+        end
+
+        it "returns the right value when saved, reloaded, and sent #avatar_fingerprint" do
+          @dummy.avatar = @file
+          @dummy.save
+          @dummy = Dummy.find(@dummy.id)
+          assert_equal "aec488126c3b33c08a10c3fa303acf27",
+                       @dummy.avatar_fingerprint
+        end
       end
     end
   end

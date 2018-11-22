@@ -1,4 +1,3 @@
-# encoding: utf-8
 require 'uri'
 require 'paperclip/url_generator'
 require 'active_support/deprecation'
@@ -34,6 +33,7 @@ module Paperclip
         :use_timestamp         => true,
         :whiny                 => Paperclip.options[:whiny] || Paperclip.options[:whiny_thumbnails],
         :validate_media_type   => true,
+        :adapter_options       => { hash_digest: Digest::MD5 },
         :check_validity_before_processing => true
       }
     end
@@ -86,7 +86,7 @@ module Paperclip
       @errors                = {}
       @dirty                 = false
       @interpolator          = options[:interpolator]
-      @url_generator         = options[:url_generator].new(self, @options)
+      @url_generator         = options[:url_generator].new(self)
       @source_file_options   = options[:source_file_options]
       @whiny                 = options[:whiny]
 
@@ -100,7 +100,8 @@ module Paperclip
     # attachment:
     #   new_user.avatar = old_user.avatar
     def assign(uploaded_file)
-      @file = Paperclip.io_adapters.for(uploaded_file)
+      @file = Paperclip.io_adapters.for(uploaded_file,
+                                        @options[:adapter_options])
       ensure_required_accessors!
       ensure_required_validations!
 
@@ -241,6 +242,10 @@ module Paperclip
     # the instance's errors and returns false, cancelling the save.
     def save
       flush_deletes unless @options[:keep_old_files]
+      process = only_process
+      if process.any? && !process.include?(:original)
+        @queued_for_write.except!(:original)
+      end
       flush_writes
       @dirty = false
       true
@@ -341,8 +346,15 @@ module Paperclip
     # inconsistencies in timing of S3 commands. It's possible that calling
     # #reprocess! will lose data if the files are not kept.
     def reprocess!(*style_args)
-      saved_only_process, @options[:only_process] = @options[:only_process], style_args
-      saved_preserve_files, @options[:preserve_files] = @options[:preserve_files], true
+      saved_flags = @options.slice(
+        :only_process,
+        :preserve_files,
+        :check_validity_before_processing
+      )
+      @options[:only_process] = style_args
+      @options[:preserve_files] = true
+      @options[:check_validity_before_processing] = false
+
       begin
         assign(self)
         save
@@ -351,8 +363,7 @@ module Paperclip
         warn "#{e} - skipping file."
         false
       ensure
-        @options[:only_process] = saved_only_process
-        @options[:preserve_files] = saved_preserve_files
+        @options.merge!(saved_flags)
       end
     end
 
@@ -552,15 +563,22 @@ module Paperclip
       begin
         raise RuntimeError.new("Style #{name} has no processors defined.") if style.processors.blank?
         intermediate_files = []
+        original = @queued_for_write[:original]
 
-        @queued_for_write[name] = style.processors.inject(@queued_for_write[:original]) do |file, processor|
+        @queued_for_write[name] = style.processors.
+          reduce(original) do |file, processor|
           file = Paperclip.processor(processor).make(file, style.processor_options, self)
           intermediate_files << file unless file == @queued_for_write[:original]
+          # if we're processing the original, close + unlink the source tempfile
+          if name == :original
+            @queued_for_write[:original].close(true)
+          end
           file
         end
 
         unadapted_file = @queued_for_write[name]
-        @queued_for_write[name] = Paperclip.io_adapters.for(@queued_for_write[name])
+        @queued_for_write[name] = Paperclip.io_adapters.
+          for(@queued_for_write[name], @options[:adapter_options])
         unadapted_file.close if unadapted_file.respond_to?(:close)
         @queued_for_write[name]
       rescue Paperclip::Errors::NotIdentifiedByImageMagickError => e
@@ -614,7 +632,11 @@ module Paperclip
     def unlink_files(files)
       Array(files).each do |file|
         file.close unless file.closed?
-        file.unlink if file.respond_to?(:unlink) && file.path.present? && File.exist?(file.path)
+
+        begin
+          file.unlink if file.respond_to?(:unlink)
+        rescue Errno::ENOENT
+        end
       end
     end
 
